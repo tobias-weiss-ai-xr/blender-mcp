@@ -2062,6 +2062,623 @@ def get_nla_tracks(ctx: Context, object_name: str) -> str:
         return json.dumps(error_from_exception(e))
 
 
+# ============================================================================
+# Visual Verification Tools
+# ============================================================================
+
+
+@telemetry_tool("capture_multi_view_screenshots")
+@mcp.tool()
+def capture_multi_view_screenshots(
+    ctx: Context,
+    views: str = "top,front,side,perspective",
+    resolution: int = 800,
+    target_object: str = "",
+) -> str:
+    """
+    Capture screenshots from multiple camera angles for visual verification.
+
+    Parameters:
+    - views: Comma-separated list of views (top, front, side, perspective, back, bottom, left, right)
+    - resolution: Maximum size in pixels for the largest dimension (default: 800)
+    - target_object: Optional object name to focus on (default: empty = full scene)
+
+    Returns a JSON response with:
+    - success: True/False
+    - views: Dictionary mapping view names to base64-encoded PNG images
+    """
+    try:
+        blender = get_blender_connection()
+
+        # Prepare the code to execute in Blender
+        code = f'''
+import bpy
+import base64
+import tempfile
+import os
+import math
+from mathutils import Vector
+
+views_list = "{views}".split(",")
+views_list = [v.strip() for v in views_list]
+resolution = {resolution}
+target_object_name = "{target_object}"
+
+# Camera positions for each view (distance, rotation in degrees)
+VIEW_CONFIGS = {{
+    "top": (Vector((0, 0, 10)), Vector((0, 0, 0)), "TOP"),
+    "front": (Vector((0, -10, 0)), Vector((90, 0, 0)), "FRONT"),
+    "back": (Vector((0, 10, 0)), Vector((90, 0, 180)), "BACK"),
+    "side": (Vector((10, 0, 0)), Vector((90, 0, 90)), "RIGHT"),
+    "left": (Vector((-10, 0, 0)), Vector((90, 0, -90)), "LEFT"),
+    "bottom": (Vector((0, 0, -10)), Vector((0, 0, 180)), "BOTTOM"),
+    "perspective": (Vector((8, -8, 6)), Vector((60, 0, 45)), "PERSPECTIVE"),
+}}
+
+def capture_view(view_name, filepath):
+    """Capture a screenshot for a specific view"""
+    if view_name not in VIEW_CONFIGS:
+        return None
+
+    location, rotation, view_type = VIEW_CONFIGS[view_name]
+
+    # Store original state
+    original_area = None
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            original_area = area
+            break
+
+    if not original_area:
+        return None
+
+    region_3d = original_area.spaces.active.region_3d
+
+    # Store original view
+    original_view_matrix = region_3d.view_matrix.copy()
+
+    try:
+        # Set the view
+        region_3d.view_rotation = rotation.to_quaternion()
+        region_3d.view_distance = location.length
+
+        # Focus on target object if specified
+        if target_object_name and target_object_name in bpy.data.objects:
+            target = bpy.data.objects[target_object_name]
+            region_3d.view_location = target.location
+        else:
+            # Center on scene
+            region_3d.view_location = Vector((0, 0, 0))
+
+        # Render the viewport
+        bpy.ops.render.opengl(write_still=True, filepath=filepath, view_context=True)
+
+        # Read and encode the image
+        if os.path.exists(filepath):
+            with open(filepath, "rb") as f:
+                return base64.b64encode(f.read()).decode('utf-8')
+        return None
+    finally:
+        # Restore original view
+        region_3d.view_matrix = original_view_matrix
+
+# Create temp directory for screenshots
+temp_dir = tempfile.gettempdir()
+result_views = {{}}
+
+for view in views_list:
+    temp_path = os.path.join(temp_dir, f"blender_multiview_{{view}}_{{os.getpid()}}.png")
+    encoded = capture_view(view, temp_path)
+    if encoded:
+        result_views[view] = encoded
+    # Clean up temp file
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+
+result = {{"views": result_views}}
+'''
+
+        result = blender.send_command("execute_code", {"code": code})
+
+        if "error" in result:
+            return json.dumps({"success": False, "error": result["error"]})
+
+        return json.dumps(
+            {
+                "success": True,
+                "views": result.get("result", {}).get("views", {}),
+                "message": "Use look_at tool with the base64 images to analyze each view",
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error capturing multi-view screenshots: {str(e)}")
+        return json.dumps({"success": False, "error": str(e)})
+
+
+@telemetry_tool("export_screenshot_to_file")
+@mcp.tool()
+def export_screenshot_to_file(
+    ctx: Context,
+    filepath: str,
+    view: str = "perspective",
+    resolution: int = 1024,
+    target_object: str = "",
+) -> str:
+    """
+    Export a high-resolution screenshot to a file for external analysis.
+
+    Parameters:
+    - filepath: Absolute path where to save the screenshot (must be .png)
+    - view: Camera angle (top, front, side, perspective, back, bottom, left, right)
+    - resolution: Resolution for the largest dimension (default: 1024)
+    - target_object: Optional object name to focus on (default: empty = full scene)
+
+    Returns a JSON response with:
+    - success: True/False
+    - filepath: Path to the saved file
+    - message: Instructions for next steps
+    """
+    try:
+        blender = get_blender_connection()
+
+        # Ensure filepath ends with .png
+        if not filepath.lower().endswith(".png"):
+            filepath = filepath + ".png"
+
+        # Prepare the code to execute in Blender
+        code = f'''
+import bpy
+import os
+from mathutils import Vector
+
+filepath = r"{filepath}"
+view_type = "{view}"
+target_object_name = "{target_object}"
+
+# Camera positions for each view
+VIEW_CONFIGS = {{
+    "top": (Vector((0, 0, 10)), Vector((0, 0, 0))),
+    "front": (Vector((0, -10, 0)), Vector((90, 0, 0))),
+    "back": (Vector((0, 10, 0)), Vector((90, 0, 180))),
+    "side": (Vector((10, 0, 0)), Vector((90, 0, 90))),
+    "left": (Vector((-10, 0, 0)), Vector((90, 0, -90))),
+    "bottom": (Vector((0, 0, -10)), Vector((0, 0, 180))),
+    "perspective": (Vector((8, -8, 6)), Vector((60, 0, 45))),
+}}
+
+def export_screenshot():
+    if view_type not in VIEW_CONFIGS:
+        return {{"error": f"Unknown view type: {{view_type}}"}}
+
+    location, rotation = VIEW_CONFIGS[view_type]
+
+    # Find 3D viewport
+    original_area = None
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            original_area = area
+            break
+
+    if not original_area:
+        return {{"error": "No 3D viewport found"}}
+
+    region_3d = original_area.spaces.active.region_3d
+    original_view_matrix = region_3d.view_matrix.copy()
+
+    try:
+        # Set the view
+        region_3d.view_rotation = rotation.to_quaternion()
+        region_3d.view_distance = location.length
+
+        # Focus on target object if specified
+        if target_object_name and target_object_name in bpy.data.objects:
+            target = bpy.data.objects[target_object_name]
+            region_3d.view_location = target.location
+        else:
+            region_3d.view_location = Vector((0, 0, 0))
+
+        # Ensure directory exists
+        dir_path = os.path.dirname(filepath)
+        if dir_path and not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+
+        # Render the viewport
+        bpy.ops.render.opengl(write_still=True, filepath=filepath, view_context=True)
+
+        if os.path.exists(filepath):
+            return {{"success": True, "filepath": filepath}}
+        return {{"error": "Screenshot file was not created"}}
+    finally:
+        # Restore original view
+        region_3d.view_matrix = original_view_matrix
+
+result = export_screenshot()
+'''
+
+        result = blender.send_command("execute_code", {"code": code})
+
+        if "error" in result:
+            return json.dumps({"success": False, "error": result["error"]})
+
+        exec_result = result.get("result", {})
+        if isinstance(exec_result, dict) and exec_result.get("success"):
+            return json.dumps(
+                {
+                    "success": True,
+                    "filepath": exec_result.get("filepath", filepath),
+                    "message": "Screenshot exported successfully. Use look_at tool to analyze the image.",
+                }
+            )
+        else:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": exec_result.get("error", "Unknown error during export"),
+                }
+            )
+
+    except Exception as e:
+        logger.error(f"Error exporting screenshot to file: {str(e)}")
+        return json.dumps({"success": False, "error": str(e)})
+
+
+@telemetry_tool("get_scene_analysis")
+@mcp.tool()
+def get_scene_analysis(ctx: Context, collection_name: str = "") -> str:
+    """
+    Get a structured analysis of the Blender scene for verification purposes.
+
+    Parameters:
+    - collection_name: Optional collection to limit analysis to (default: empty = entire scene)
+
+    Returns a JSON response with:
+    - success: True/False
+    - analysis: Dictionary containing object counts, bounding boxes, potential issues
+    """
+    try:
+        blender = get_blender_connection()
+
+        code = f'''
+import bpy
+from mathutils import Vector
+import json
+
+collection_name = "{collection_name}"
+
+def analyze_scene():
+    """Analyze the scene and return structured data"""
+    analysis = {{
+        "object_count": 0,
+        "mesh_count": 0,
+        "light_count": 0,
+        "camera_count": 0,
+        "objects": [],
+        "issues": [],
+        "bounds": {{"min": [0, 0, 0], "max": [0, 0, 0]}},
+        "scene_center": [0, 0, 0],
+    }}
+
+    # Get objects to analyze
+    if collection_name and collection_name in bpy.data.collections:
+        objects = bpy.data.collections[collection_name].all_objects
+    else:
+        objects = bpy.context.scene.objects
+
+    all_positions = []
+
+    for obj in objects:
+        analysis["object_count"] += 1
+
+        obj_info = {{
+            "name": obj.name,
+            "type": obj.type,
+            "location": list(obj.location),
+            "rotation": [obj.rotation_euler.x, obj.rotation_euler.y, obj.rotation_euler.z],
+            "scale": list(obj.scale),
+        }}
+
+        # Get bounding box if available
+        if obj.type == 'MESH' and obj.data:
+            analysis["mesh_count"] += 1
+            # Calculate world-space bounding box
+            bbox_corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+            min_corner = Vector((min(v[i] for v in bbox_corners) for i in range(3)))
+            max_corner = Vector((max(v[i] for v in bbox_corners) for i in range(3)))
+            obj_info["bbox_min"] = list(min_corner)
+            obj_info["bbox_max"] = list(max_corner)
+            obj_info["dimensions"] = list(max_corner - min_corner)
+            all_positions.extend(bbox_corners)
+
+            # Check for potential issues
+            if obj.dimensions.z < 0.01 and obj.location.z > 0.1:
+                analysis["issues"].append({{
+                    "object": obj.name,
+                    "type": "floating_object",
+                    "message": f"Object appears to be floating (z={{obj.location.z:.2f}})"
+                }})
+
+        elif obj.type == 'LIGHT':
+            analysis["light_count"] += 1
+        elif obj.type == 'CAMERA':
+            analysis["camera_count"] += 1
+
+        analysis["objects"].append(obj_info)
+
+    # Calculate scene bounds
+    if all_positions:
+        min_pos = Vector((min(v[i] for v in all_positions) for i in range(3)))
+        max_pos = Vector((max(v[i] for v in all_positions) for i in range(3)))
+        analysis["bounds"] = {{"min": list(min_pos), "max": list(max_pos)}}
+        analysis["scene_center"] = list((min_pos + max_pos) / 2)
+
+    # Add summary
+    analysis["summary"] = {{
+        "total_objects": analysis["object_count"],
+        "meshes": analysis["mesh_count"],
+        "lights": analysis["light_count"],
+        "cameras": analysis["camera_count"],
+        "issues_found": len(analysis["issues"]),
+    }}
+
+    return analysis
+
+result = analyze_scene()
+'''
+
+        result = blender.send_command("execute_code", {"code": code})
+
+        if "error" in result:
+            return json.dumps({"success": False, "error": result["error"]})
+
+        analysis = result.get("result", {})
+
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": analysis,
+                "message": "Scene analysis complete. Check for floating objects or other issues.",
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error analyzing scene: {str(e)}")
+        return json.dumps({"success": False, "error": str(e)})
+
+
+@telemetry_tool("verify_geometry")
+@mcp.tool()
+def verify_geometry(
+    ctx: Context,
+    object_name: str = "",
+    checks: str = "manifold,normals,degenerate,overlapping,holes",
+) -> str:
+    """
+    Verify geometry for 3D printing or other quality requirements.
+
+    Parameters:
+    - object_name: Specific mesh object to check (default: empty = check all meshes)
+    - checks: Comma-separated list of checks to perform
+              - manifold: Check for non-manifold edges (open mesh)
+              - normals: Check for flipped normals
+              - degenerate: Check for degenerate faces (zero area)
+              - overlapping: Check for overlapping vertices
+              - holes: Check for holes in the mesh
+
+    Returns a JSON response with:
+    - success: True/False
+    - verification: Dictionary containing check results and issues found
+    """
+    try:
+        blender = get_blender_connection()
+
+        code = f'''
+import bpy
+import bmesh
+from mathutils import Vector
+import math
+
+object_name = "{object_name}"
+checks_list = "{checks}".split(",")
+checks_list = [c.strip() for c in checks_list]
+
+def verify_mesh(obj, checks):
+    """Verify a single mesh object"""
+    results = {{
+        "object_name": obj.name,
+        "vertex_count": len(obj.data.vertices),
+        "edge_count": len(obj.data.edges),
+        "face_count": len(obj.data.polygons),
+        "checks": {{}},
+        "issues": [],
+        "is_printable": True,
+    }}
+
+    # Create bmesh for analysis
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+
+    try:
+        # Manifold check
+        if "manifold" in checks:
+            non_manifold = [e for e in bm.edges if not e.is_manifold]
+            boundary_edges = [e for e in bm.edges if e.is_boundary]
+
+            results["checks"]["manifold"] = {{
+                "is_manifold": len(non_manifold) == 0,
+                "non_manifold_edges": len(non_manifold),
+                "boundary_edges": len(boundary_edges),
+            }}
+
+            if len(non_manifold) > 0:
+                results["issues"].append({{
+                    "type": "non_manifold",
+                    "count": len(non_manifold),
+                    "message": f"Found {{len(non_manifold)}} non-manifold edges"
+                }})
+                results["is_printable"] = False
+
+        # Normals check
+        if "normals" in checks:
+            flipped_faces = []
+            for face in bm.faces:
+                if face.normal.z < 0 and all(v.co.z < face.calc_center_median().z for v in face.verts):
+                    flipped_faces.append(face)
+
+            results["checks"]["normals"] = {{
+                "flipped_count": len(flipped_faces),
+                "all_consistent": len(flipped_faces) == 0,
+            }}
+
+            if len(flipped_faces) > 0:
+                results["issues"].append({{
+                    "type": "flipped_normals",
+                    "count": len(flipped_faces),
+                    "message": f"Found {{len(flipped_faces)}} potentially flipped faces"
+                }})
+
+        # Degenerate faces check
+        if "degenerate" in checks:
+            degenerate_faces = []
+            for face in bm.faces:
+                area = face.calc_area()
+                if area < 0.0001:  # Very small threshold
+                    degenerate_faces.append(face)
+
+            results["checks"]["degenerate"] = {{
+                "degenerate_count": len(degenerate_faces),
+                "min_face_area": min((f.calc_area() for f in bm.faces), default=0),
+            }}
+
+            if len(degenerate_faces) > 0:
+                results["issues"].append({{
+                    "type": "degenerate_faces",
+                    "count": len(degenerate_faces),
+                    "message": f"Found {{len(degenerate_faces)}} degenerate (near-zero area) faces"
+                }})
+
+        # Overlapping vertices check
+        if "overlapping" in checks:
+            merge_threshold = 0.001
+            overlapping_count = 0
+            checked = set()
+
+            for i, v1 in enumerate(bm.verts):
+                if i in checked:
+                    continue
+                for j, v2 in enumerate(bm.verts[i+1:], i+1):
+                    if (v1.co - v2.co).length < merge_threshold:
+                        overlapping_count += 1
+                        checked.add(j)
+
+            results["checks"]["overlapping"] = {{
+                "overlapping_count": overlapping_count,
+                "threshold": merge_threshold,
+            }}
+
+            if overlapping_count > 0:
+                results["issues"].append({{
+                    "type": "overlapping_vertices",
+                    "count": overlapping_count,
+                    "message": f"Found {{overlapping_count}} pairs of overlapping vertices"
+                }})
+
+        # Holes check (based on boundary edges)
+        if "holes" in checks:
+            boundary_loops = []
+            visited = set()
+
+            for edge in bm.edges:
+                if edge.is_boundary and edge not in visited:
+                    # Simple boundary edge count as proxy for holes
+                    boundary_loops.append(edge)
+
+            results["checks"]["holes"] = {{
+                "boundary_edge_count": len(boundary_loops),
+                "has_holes": len(boundary_loops) > 0,
+            }}
+
+            if len(boundary_loops) > 0:
+                results["issues"].append({{
+                    "type": "holes",
+                    "boundary_edges": len(boundary_loops),
+                    "message": f"Found {{len(boundary_loops)}} boundary edges indicating potential holes"
+                }})
+                results["is_printable"] = False
+
+    finally:
+        bm.free()
+
+    return results
+
+def verify_all_objects():
+    """Verify all mesh objects or a specific one"""
+    results = {{
+        "objects": [],
+        "summary": {{
+            "total_checked": 0,
+            "printable": 0,
+            "with_issues": 0,
+            "total_issues": 0,
+        }},
+    }}
+
+    if object_name:
+        if object_name in bpy.data.objects:
+            obj = bpy.data.objects[object_name]
+            if obj.type == 'MESH':
+                obj_result = verify_mesh(obj, checks_list)
+                results["objects"].append(obj_result)
+                results["summary"]["total_checked"] += 1
+                if obj_result["is_printable"]:
+                    results["summary"]["printable"] += 1
+                else:
+                    results["summary"]["with_issues"] += 1
+                results["summary"]["total_issues"] += len(obj_result["issues"])
+            else:
+                results["error"] = f"Object '{{object_name}}' is not a mesh"
+        else:
+            results["error"] = f"Object '{{object_name}}' not found"
+    else:
+        # Check all mesh objects in the scene
+        for obj in bpy.context.scene.objects:
+            if obj.type == 'MESH':
+                obj_result = verify_mesh(obj, checks_list)
+                results["objects"].append(obj_result)
+                results["summary"]["total_checked"] += 1
+                if obj_result["is_printable"]:
+                    results["summary"]["printable"] += 1
+                else:
+                    results["summary"]["with_issues"] += 1
+                results["summary"]["total_issues"] += len(obj_result["issues"])
+
+    return results
+
+result = verify_all_objects()
+'''
+
+        result = blender.send_command("execute_code", {"code": code})
+
+        if "error" in result:
+            return json.dumps({"success": False, "error": result["error"]})
+
+        verification = result.get("result", {})
+
+        return json.dumps(
+            {
+                "success": True,
+                "verification": verification,
+                "message": "Geometry verification complete. Review issues for 3D print compatibility.",
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error verifying geometry: {str(e)}")
+        return json.dumps({"success": False, "error": str(e)})
+
+
 # Main execution
 
 
